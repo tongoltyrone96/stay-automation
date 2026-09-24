@@ -60,7 +60,34 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS guest_notices (
+    reservation_id INTEGER PRIMARY KEY,
+    property_id INTEGER,
+    sent_at TEXT NOT NULL,
+    delivered INTEGER NOT NULL,
+    message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alerts_sent (
+    key TEXT PRIMARY KEY,
+    at TEXT NOT NULL
+);
 """
+
+# Columns added after the first release; applied to existing databases on start.
+MIGRATIONS = {
+    "properties": {
+        "backup_code": "TEXT",
+        "backup_used_by": "INTEGER",
+    },
+    "locks": {
+        "next_check_at": "TEXT",
+        "fail_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_error": "TEXT",
+        "last_reconciled_at": "TEXT",
+    },
+}
 
 
 def utcnow() -> str:
@@ -78,6 +105,11 @@ class DB:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            for table, columns in MIGRATIONS.items():
+                have = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+                for column, ddl in columns.items():
+                    if column not in have:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def query(self, sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         with self._lock:
@@ -101,6 +133,15 @@ class DB:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+    def get_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.get_setting(key, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        return self.get_setting(key, "1" if default else "0") == "1"
 
     def log(self, kind: str, message: str, *, level: str = "info",
             property_id: int | None = None, reservation_id: int | None = None) -> None:

@@ -93,6 +93,18 @@ class HostawayClient:
         body = await self._request("GET", f"/reservations/{reservation_id}")
         return body["result"]
 
+    async def send_guest_message(self, reservation_id: int, body: str) -> None:
+        """Post a message into the guest's conversation (goes out on the booking channel)."""
+        found = await self._request("GET", "/conversations", params={"reservationId": reservation_id})
+        conversations = [c for c in found.get("result") or []
+                         if str(c.get("reservationId")) == str(reservation_id)]
+        if not conversations:
+            raise HostawayError(f"No conversation for reservation {reservation_id}")
+        await self._request(
+            "POST", f"/conversations/{conversations[0]['id']}/messages",
+            json={"body": body, "communicationType": "channel"},
+        )
+
     async def unified_webhooks(self) -> list[dict[str, Any]]:
         body = await self._request("GET", "/webhooks/unifiedWebhooks")
         return body.get("result") or []

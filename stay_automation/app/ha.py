@@ -62,6 +62,30 @@ class HAClient:
         codes = (body or {}).get("service_response", {}).get(entity_id, {})
         return {c["name"]: c["code"] for c in codes.values()}
 
+    async def add_code(self, entity_id: str, name: str, code: str) -> None:
+        await self._post(
+            "/api/services/schlage/add_code",
+            {"entity_id": entity_id, "name": name, "code": code, "notify_on_use": False},
+            timeout=SCHLAGE_TIMEOUT,
+        )
+
+    async def delete_code(self, entity_id: str, name: str) -> None:
+        await self._post(
+            "/api/services/schlage/delete_code",
+            {"entity_id": entity_id, "name": name},
+            timeout=SCHLAGE_TIMEOUT,
+        )
+
+    async def notify(self, title: str, message: str, *, service: str = "", notification_id: str = "") -> None:
+        """Persistent notification in HA, plus an optional notify service (e.g. notify.mobile_app_x)."""
+        await self._post(
+            "/api/services/persistent_notification/create",
+            {"title": title, "message": message, "notification_id": notification_id or None},
+        )
+        if service.startswith("notify."):
+            await self._post(f"/api/services/notify/{service.removeprefix('notify.')}",
+                             {"title": title, "message": message})
+
     async def webhook_automation_exists(self) -> bool:
         resp = await self._http.get(f"/api/config/automation/config/{WEBHOOK_AUTOMATION_ID}")
         return resp.status_code == 200

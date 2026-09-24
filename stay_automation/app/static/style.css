@@ -37,7 +37,8 @@ tr.problem td:first-child { box-shadow: inset 3px 0 var(--bad); }
 form.inline { display: inline; }
 .stack { display: grid; gap: 10px; max-width: 520px; }
 .stack label { display: grid; gap: 4px; }
-input, select, button { font: inherit; color: inherit; }
+input, select, button, textarea { font: inherit; color: inherit; }
+textarea { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 input:not([type=checkbox]), select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); min-width: 0; }
 button { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

@@ -120,11 +120,14 @@ class Syncer:
             self.db.log("lock.read_failed", f"Could not read codes from {lock['name']}: {exc}",
                         level="warning", property_id=lock["property_id"])
             return
+        self.store_lock_snapshot(lock["id"], codes)
+
+    def store_lock_snapshot(self, lock_id: int, codes: dict[str, str]) -> None:
         self.db.execute(
             "UPDATE locks SET code_hashes = ?, code_names = ?, codes_read_at = ?, codes_error = NULL "
             "WHERE id = ?",
             (json.dumps(sorted(self.code_hash(c) for c in codes.values())),
-             json.dumps(sorted(codes)), utcnow(), lock["id"]),
+             json.dumps(sorted(codes)), utcnow(), lock_id),
         )
 
     async def check_arrival_locks(self) -> int:
@@ -132,7 +135,8 @@ class Syncer:
         now = self.now()
         checked = 0
         for lock in self.db.query(
-            "SELECT * FROM locks WHERE property_id IS NOT NULL AND state != 'unavailable'"
+            "SELECT l.* FROM locks l JOIN properties p ON p.id = l.property_id "
+            "WHERE l.state != 'unavailable' AND p.lock_automation = 0"  # automated locks are read by LockManager
         ):
             reservations = self.reservations_for(lock["property_id"])
             state = property_state(reservations, now)
@@ -171,6 +175,8 @@ class Syncer:
         if what:
             prop = self.db.one("SELECT id FROM properties WHERE hostaway_listing_id = ?",
                                (new["listing_id"],))
+            if prop:  # let the lock logic look at this home on its next pass
+                self.db.execute("UPDATE locks SET next_check_at = NULL WHERE property_id = ?", (prop["id"],))
             self.db.log(
                 "reservation." + what[0],
                 f"Reservation {new['id']}: {', '.join(what)} "

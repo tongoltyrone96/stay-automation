@@ -12,11 +12,14 @@ from .config import load_settings
 from .db import DB
 from .ha import HAClient
 from .hostaway import HostawayClient
+from .locks import LockManager
 from .sync import Syncer
 from .web import create_app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stay")
+
+LOCK_TICK_MINUTES = 5
 
 
 async def run_logged(name: str, job: Callable[[], Awaitable[object]], db: DB) -> None:
@@ -64,6 +67,7 @@ def build():
     )
     ha = HAClient(settings.ha_url, settings.ha_token)
     syncer = Syncer(db, settings, hostaway, ha)
+    locks = LockManager(syncer)
 
     discover = _then(syncer.import_listings, syncer.discover_locks)
 
@@ -79,6 +83,7 @@ def build():
             every(settings.sync_minutes, "sync", syncer.sync_reservations, db),
             every(settings.lock_discovery_minutes, "lock_discovery", discover, db),
             every(settings.lock_check_minutes, "lock_check", syncer.check_arrival_locks, db),
+            every(LOCK_TICK_MINUTES, "lock_automation", locks.tick, db),
         )
 
     @asynccontextmanager
@@ -94,7 +99,7 @@ def build():
         await hostaway.close()
         await ha.close()
 
-    return create_app(syncer, lifespan=lifespan)
+    return create_app(syncer, locks, lifespan=lifespan)
 
 
 def _then(*jobs: Callable[[], Awaitable[object]]) -> Callable[[], Awaitable[None]]:

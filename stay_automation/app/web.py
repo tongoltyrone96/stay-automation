@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .locks import DEFAULT_GUEST_MESSAGE, DEFAULTS, LockManager
 from .reservations import code_status, property_state, within
 from .sync import Syncer
 
@@ -74,6 +75,8 @@ def dashboard_rows(syncer: Syncer, query: str = "") -> list[dict[str, Any]]:
                 problems.append(f"{lock['name']} offline")
             elif lock["codes_error"]:
                 problems.append(f"{lock['name']}: read failed")
+            if prop["lock_automation"] and lock["fail_count"]:
+                problems.append(f"{lock['name']}: {lock['last_error']} (tries: {lock['fail_count']})")
 
         rows.append({
             "id": prop["id"],
@@ -96,7 +99,18 @@ def dashboard_rows(syncer: Syncer, query: str = "") -> list[dict[str, Any]]:
     return rows
 
 
-def create_app(syncer: Syncer, lifespan=None) -> FastAPI:
+SETTING_LABELS = {
+    "add_hour": "Add guest code at (hour, 0-23, arrival day)",
+    "early_lead_hours": "For early check-ins, add this many hours before",
+    "afternoon_check_hour": "Afternoon re-check (hour)",
+    "final_check_minutes": "Final check, minutes before check-in",
+    "retry_minutes": "Retry failed locks every (minutes)",
+    "daily_check_hour": "Daily lock check (hour)",
+    "report_hour": "Daily arrivals report (hour)",
+}
+
+
+def create_app(syncer: Syncer, locks: LockManager | None = None, lifespan=None) -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     db = syncer.db
@@ -138,6 +152,9 @@ def create_app(syncer: Syncer, lifespan=None) -> FastAPI:
             new_pid = int(value) if value.isdigit() else None
             if new_pid != lock["property_id"]:
                 syncer.assign_lock(lock["id"], new_pid)
+        # Homes switched on (or edited) get their locks looked at on the next pass.
+        db.execute("UPDATE locks SET next_check_at = NULL WHERE property_id IN "
+                   "(SELECT id FROM properties WHERE lock_automation = 1)")
         db.log("properties.saved", "Property settings saved")
         return RedirectResponse("properties", status_code=303)
 
@@ -181,7 +198,39 @@ def create_app(syncer: Syncer, lifespan=None) -> FastAPI:
             webhook_url=f"{public_url}/api/webhook/{webhook_id[:6]}…" if webhook_id else "",
             registered=db.get_setting("hostaway_webhook_registered_at"),
             is_addon=syncer.settings.is_addon,
+            numbers=[(k, SETTING_LABELS[k], db.get_int(k, v)) for k, v in DEFAULTS.items()],
+            alert_service=db.get_setting("alert_service", "") or "",
+            backup_codes_enabled=db.get_bool("backup_codes_enabled"),
+            guest_messages_enabled=db.get_bool("guest_messages_enabled"),
+            guest_message=db.get_setting("guest_message") or DEFAULT_GUEST_MESSAGE,
+            automated=db.one("SELECT COUNT(*) AS n FROM properties WHERE lock_automation = 1")["n"],
         )
+
+    @app.post("/settings-save")
+    async def settings_save(request: Request):
+        form = await request.form()
+        for key, default in DEFAULTS.items():
+            value = str(form.get(key, "")).strip()
+            if value.isdigit():
+                db.set_setting(key, value)
+        db.set_setting("alert_service", str(form.get("alert_service", "")).strip())
+        db.set_setting("backup_codes_enabled", "1" if form.get("backup_codes_enabled") else "0")
+        db.set_setting("guest_messages_enabled", "1" if form.get("guest_messages_enabled") else "0")
+        message = str(form.get("guest_message", "")).strip()
+        try:
+            message.format(guest="", property="", code="")
+        except (KeyError, IndexError, ValueError):
+            raise HTTPException(400, "Guest message may only use {guest}, {property} and {code}")
+        db.set_setting("guest_message", message)
+        db.execute("UPDATE locks SET next_check_at = NULL")
+        db.log("settings.saved", "Lock automation settings saved")
+        return RedirectResponse("setup", status_code=303)
+
+    @app.post("/test-alert")
+    async def test_alert():
+        if locks is not None:
+            await locks.alert("Stay Automation test", "Alerts are working.")
+        return RedirectResponse("setup", status_code=303)
 
     @app.post("/setup-webhook")
     async def setup_webhook(public_url: str = Form(...), addon_slug: str = Form(...),

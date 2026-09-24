@@ -18,5 +18,25 @@
   <label><input type="checkbox" name="register_hostaway"> Also register the webhook with Hostaway</label>
   <button class="primary">Save webhook</button>
 </form>
+<h2>Lock automation</h2>
+<p class="sub">Runs only for homes with "Lock automation" ticked on the Properties page ({{ automated }} now).
+  Guest codes are named HA-&lt;reservation&gt; in the lock; other codes are never touched.</p>
+<form method="post" action="settings-save" class="stack">
+  {% for key, label, value in numbers %}
+  <label>{{ label }} <input name="{{ key }}" value="{{ value }}" inputmode="numeric"></label>
+  {% endfor %}
+  <label>Alert also through (optional HA notify service, e.g. notify.mobile_app_kurts_iphone)
+    <input name="alert_service" value="{{ alert_service }}" placeholder="notify.…"></label>
+  <label><input type="checkbox" name="backup_codes_enabled" {{ 'checked' if backup_codes_enabled }}>
+    Keep a backup code (HA-BACKUP) in every automated lock</label>
+  <label><input type="checkbox" name="guest_messages_enabled" {{ 'checked' if guest_messages_enabled }}>
+    Send the backup code to the guest through Hostaway when their code is not confirmed an hour before check-in
+    (off: staff are alerted instead)</label>
+  <label>Guest message ({guest}, {property}, {code})
+    <textarea name="guest_message" rows="3">{{ guest_message }}</textarea></label>
+  <button class="primary">Save settings</button>
+</form>
+<form method="post" action="test-alert" class="inline"><button>Send test alert</button></form>
+
 {% if not is_addon %}<p class="sub">Running outside Home Assistant (development mode).</p>{% endif %}
 {% endblock %}
