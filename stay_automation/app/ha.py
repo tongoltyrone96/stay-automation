@@ -78,10 +78,10 @@ class HAClient:
 
     async def notify(self, title: str, message: str, *, service: str = "", notification_id: str = "") -> None:
         """Persistent notification in HA, plus an optional notify service (e.g. notify.mobile_app_x)."""
-        await self._post(
-            "/api/services/persistent_notification/create",
-            {"title": title, "message": message, "notification_id": notification_id or None},
-        )
+        payload = {"title": title, "message": message}
+        if notification_id:
+            payload["notification_id"] = notification_id
+        await self._post("/api/services/persistent_notification/create", payload)
         if service.startswith("notify."):
             await self._post(f"/api/services/notify/{service.removeprefix('notify.')}",
                              {"title": title, "message": message})

@@ -329,6 +329,7 @@ class LockManager:
                                  notification_id=key or "")
         except Exception as exc:
             log.error("alert failed: %s", exc)
+            self.db.log("alert.failed", f"Could not deliver alert '{title}': {exc}", level="error")
         if key:
             self.db.execute("INSERT OR IGNORE INTO alerts_sent(key, at) VALUES(?, ?)", (key, utcnow()))
         self.db.log("alert", f"{title}: {message}", level="warning")
