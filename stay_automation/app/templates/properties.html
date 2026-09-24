@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% set active = 'properties' %}
+{% block body %}
+<form method="post" action="properties-save">
+<h2>Locks</h2>
+<p class="sub">Locks are found in Home Assistant automatically and matched by name. Fix any that are wrong or unmatched; your choice is kept.</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Lock</th><th>State</th><th>Property</th><th>Matched</th></tr></thead>
+  <tbody>
+  {% for l in locks %}
+    <tr class="{{ 'problem' if not l.property_id }}">
+      <td>{{ l.name }}<div class="sub">{{ l.entity_id }}</div></td>
+      <td>{{ l.state }}</td>
+      <td><select name="lock_{{ l.id }}">
+        <option value="">— not assigned —</option>
+        {% for p in properties %}<option value="{{ p.id }}" {{ 'selected' if p.id == l.property_id }}>{{ p.name }}</option>{% endfor %}
+      </select></td>
+      <td class="sub">{{ l.match_source or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Properties</h2>
+<p class="sub">From Hostaway. "Lock automation" lets this system add and remove guest codes. Turn it on per home, starting with the pilot.</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Name</th><th>Hostaway name</th><th>Active</th><th>Lock automation</th></tr></thead>
+  <tbody>
+  {% for p in properties %}
+    <tr>
+      <td><input name="name_{{ p.id }}" value="{{ p.name }}"></td>
+      <td class="sub">{{ p.hostaway_name }} · #{{ p.hostaway_listing_id }}</td>
+      <td><input type="checkbox" name="active_{{ p.id }}" {{ 'checked' if p.active }}></td>
+      <td><input type="checkbox" name="auto_{{ p.id }}" {{ 'checked' if p.lock_automation }}></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p><button class="primary">Save</button></p>
+</form>
+{% endblock %}

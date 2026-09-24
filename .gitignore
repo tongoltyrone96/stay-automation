@@ -1,0 +1,13 @@
+# secrets and client data
+.ha_token
+.env
+research/
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.log
+docs/

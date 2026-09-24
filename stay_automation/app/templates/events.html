@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% set active = 'events' %}
+{% block body %}
+<div class="scroll">
+<table>
+  <thead><tr><th>Time</th><th>Property</th><th>Event</th></tr></thead>
+  <tbody>
+  {% for e in events %}
+    <tr class="lv-{{ e.level }}">
+      <td class="sub nowrap">{{ e.at_local }}</td>
+      <td>{{ e.property or '' }}</td>
+      <td>{{ e.message }}<div class="sub">{{ e.kind }}</div></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="3" class="sub">Nothing yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

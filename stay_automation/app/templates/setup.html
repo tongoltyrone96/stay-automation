@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% set active = 'setup' %}
+{% block body %}
+<h2>Connections</h2>
+<ul class="checks">
+  <li>Home Assistant: <strong>{{ 'connected' if ha_ok else 'NOT connected' }}</strong></li>
+  <li>Last Hostaway sync: <strong>{{ last_sync or 'never' }}</strong></li>
+  <li>Webhook automation in Home Assistant: <strong>{{ 'present' if automation else 'missing' }}</strong></li>
+  <li>Webhook registered with Hostaway: <strong>{{ registered or 'no' }}</strong></li>
+  {% if webhook_url %}<li class="sub">Webhook URL: {{ webhook_url }}</li>{% endif %}
+</ul>
+
+<h2>Real-time updates from Hostaway</h2>
+<p class="sub">Hostaway sends each booking change to the public Home Assistant address, and Home Assistant passes it to this add-on.
+  Without it, changes still arrive through the 15-minute sync.</p>
+<form method="post" action="setup-webhook" class="stack">
+  <label>Public Home Assistant address <input name="public_url" value="{{ public_url }}"></label>
+  <label>Add-on slug <input name="addon_slug" value="{{ addon_slug }}"></label>
+  <label><input type="checkbox" name="register_hostaway"> Also register the webhook with Hostaway</label>
+  <button class="primary">Save webhook</button>
+</form>
+{% if not is_addon %}<p class="sub">Running outside Home Assistant (development mode).</p>{% endif %}
+{% endblock %}

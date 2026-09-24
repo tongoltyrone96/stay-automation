@@ -1,0 +1,39 @@
+{% extends "base.html" %}{% set active = 'status' %}
+{% block body %}
+<div class="summary">
+  <span class="pill bad">{{ problems }} need attention</span>
+  <span class="pill">{{ counts.arriving_today + counts.turnover_today }} arriving today</span>
+  <span class="pill">{{ counts.departing_today + counts.turnover_today }} departing today</span>
+  <span class="pill">{{ counts.occupied }} occupied</span>
+  <span class="pill">{{ counts.vacant }} vacant</span>
+  <form method="get" action="." class="inline search">
+    <input name="q" value="{{ q }}" placeholder="Search property">
+  </form>
+</div>
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>Property</th><th>Status</th><th>Current guest</th><th>Next arrival</th><th>Guest code</th><th>Locks</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr class="{{ 'problem' if r.problems }}">
+      <td><strong>{{ r.name }}</strong>
+        {% for p in r.problems %}<div class="warn">{{ p }}</div>{% endfor %}
+      </td>
+      <td><span class="st st-{{ r.status }}">{{ r.status_label }}</span></td>
+      <td>{% if r.current_guest %}{{ r.current_guest }}<div class="sub">out {{ r.current_out }}</div>{% endif %}</td>
+      <td>{% if r.next_in %}{{ r.next_guest }}<div class="sub">{{ r.next_in }}</div>{% endif %}</td>
+      <td><span class="code code-{{ r.code }}">{{ r.code_label }}</span>
+        {% if r.lock_read %}<div class="sub">checked {{ r.lock_read }}</div>{% endif %}</td>
+      <td>{% for l in r.locks %}<div class="sub">{{ l.name }} · {{ l.state }}</div>{% else %}<span class="sub">none</span>{% endfor %}</td>
+      <td>{% if r.locks %}<form method="post" action="lock-refresh" class="inline">
+        <input type="hidden" name="property_id" value="{{ r.id }}"><button title="Read codes from the lock now">Check lock</button></form>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="sub">No properties yet. Press "Sync now".</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
