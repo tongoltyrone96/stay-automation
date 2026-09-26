@@ -40,6 +40,17 @@ def test_number_prefix_does_not_match_longer_number():
     assert match_lock("122 Maple", LISTINGS) == BY_NAME["Maple 122"]
 
 
+def test_address_matches_house_number_the_name_lacks():
+    listings = [
+        {"id": 1, "name": "Falling Water 1", "hostaway_name": "Falling Water 1", "address": "1200 Falling Water Drive"},
+        {"id": 2, "name": "Falling Water 2", "hostaway_name": "Falling Water 2", "address": "1114 Falling Water Drive"},
+        {"id": 3, "name": "MoonlitB", "hostaway_name": "MoonlitB", "address": "826 Moonlit Lane Northwest"},
+        {"id": 4, "name": "Moonlight", "hostaway_name": "Moonlight", "address": None},
+    ]
+    assert match_lock("1114 Falling Water Front", listings) == 2
+    assert match_lock("826 Moonlit Jan26", listings) == 3
+
+
 def test_no_match_or_ambiguous_returns_none():
     assert match_lock("6805 Hill", LISTINGS) is None
     assert match_lock("Maple", LISTINGS) is None  # many Maples

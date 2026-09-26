@@ -20,7 +20,8 @@
 </form>
 <h2>Lock automation</h2>
 <p class="sub">Runs only for homes with "Lock automation" ticked on the Properties page ({{ automated }} now).
-  Guest codes are named HA-&lt;reservation&gt; in the lock; other codes are never touched.</p>
+  Hostaway's lock automation stays on; a guest code Hostaway already put in the lock counts as present.
+  Our own copies are named HA-&lt;reservation&gt;; other codes are never touched.</p>
 <form method="post" action="settings-save" class="stack">
   {% for key, label, value in numbers %}
   <label>{{ label }} <input name="{{ key }}" value="{{ value }}" inputmode="numeric"></label>

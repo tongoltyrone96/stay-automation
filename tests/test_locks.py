@@ -78,6 +78,7 @@ class FakeLock:
         self.broken_add = set()
         self.delete_times_out = False
         self.read_fails = False
+        self.on_add = None
         self.notes = []
 
     async def get_codes(self, entity_id):
@@ -86,6 +87,8 @@ class FakeLock:
         return dict(self.codes[entity_id])
 
     async def add_code(self, entity_id, name, code):
+        if self.on_add:
+            self.on_add()
         if name not in self.broken_add:
             self.codes[entity_id][name] = code
 
@@ -230,6 +233,100 @@ def test_homes_without_automation_are_left_alone(lm):
     lm.s.upsert_reservation(res())
     assert tick_at(lm, at("2030-01-10T08:01")) == 0
     assert "HA-1" not in lm.ha.codes["lock.a"]
+
+
+def test_change_during_reconcile_is_not_lost(lm):
+    # A cancellation arrives by webhook while the (slow) add call is in flight.
+    lm.s.upsert_reservation(res())
+    lm.ha.on_add = lambda: lm.s.upsert_reservation(res(status="cancelled"))
+    tick_at(lm, at("2030-01-10T08:01"))
+    assert lock_row(lm)["next_check_at"] is None  # the reset survived the end of the reconcile
+    lm.ha.on_add = None
+    tick_at(lm, at("2030-01-10T08:06"))
+    assert "HA-1" not in lm.ha.codes["lock.a"]
+
+
+def test_moved_reservation_follows_the_guest(lm):
+    pid = lm.db.execute("INSERT INTO properties(hostaway_listing_id, hostaway_name, name, lock_automation) "
+                        "VALUES(200, 'Oak 2', 'Oak 2', 1)")
+    lm.db.execute("INSERT INTO locks(entity_id, name, state, property_id, match_source) "
+                  "VALUES('lock.b', 'Oak front', 'locked', ?, 'manual')", (pid,))
+    lm.ha.codes["lock.b"] = {}
+    lm.s.upsert_reservation(res())
+    tick_at(lm, at("2030-01-10T08:01"))
+    assert "HA-1" in lm.ha.codes["lock.a"]
+
+    moved = res()
+    moved["listingMapId"] = 200
+    assert lm.s.upsert_reservation(moved) == ["moved"]
+    assert tick_at(lm, at("2030-01-10T08:10")) == 2  # both homes looked at again
+    assert "HA-1" not in lm.ha.codes["lock.a"] and lm.ha.codes["lock.b"] == {"HA-1": "4821"}
+
+
+def test_switched_off_home_keeps_current_guest_code_then_cleans_up(lm):
+    lm.db.set_setting("backup_codes_enabled", "1")
+    lm.s.upsert_reservation(res())
+    lm.s.upsert_reservation(res(id=2, arrival="2030-01-16", departure="2030-01-20", code="7777"))
+    tick_at(lm, at("2030-01-10T08:01"))
+    assert set(lm.ha.codes["lock.a"]) == {"Master", "HA-1", BACKUP_NAME}
+
+    lm.db.execute("UPDATE properties SET lock_automation = 0")
+    lm.db.execute("UPDATE locks SET next_check_at = NULL")  # what saving the Properties page does
+    tick_at(lm, at("2030-01-10T09:00"))
+    assert set(lm.ha.codes["lock.a"]) == {"Master", "HA-1"}  # guest keeps their code, backup goes
+    tick_at(lm, at("2030-01-15T10:01"))
+    assert lm.ha.codes["lock.a"] == {"Master": "9999"}  # removed at checkout
+    tick_at(lm, at("2030-01-16T08:01"))
+    assert lm.ha.codes["lock.a"] == {"Master": "9999"}  # nothing new is added
+    assert not [t for t, _ in lm.ha.notes if "NOT confirmed" in t]  # and no guest fallback
+
+
+def test_backup_code_never_equals_a_code_already_in_the_lock(lm, monkeypatch):
+    lm.db.set_setting("backup_codes_enabled", "1")
+    picks = iter([8999, 1233])  # randbelow(9000) + 1000: first "9999" (= Master), then "2233"
+    monkeypatch.setattr("app.locks.secrets.randbelow", lambda n: next(picks))
+    tick_at(lm, at("2030-01-10T08:01"))  # lock never read before: Master's value slips through once
+    assert lm.db.one("SELECT backup_code FROM properties")["backup_code"] is None  # ...and is caught
+    tick_at(lm, at("2030-01-10T08:06"))
+    assert lm.db.one("SELECT backup_code FROM properties")["backup_code"] == "2233"
+    assert lm.ha.codes["lock.a"] == {"Master": "9999", BACKUP_NAME: "2233"}
+
+
+def test_code_hostaway_already_wrote_is_left_alone_and_logged_once(lm):
+    lm.s.upsert_reservation(res())
+    lm.ha.codes["lock.a"]["Ann Lee"] = "4821"  # Hostaway put it in
+    tick_at(lm, at("2030-01-10T08:01"))
+    tick_at(lm, at("2030-01-10T14:01"))
+    assert lm.ha.codes["lock.a"] == {"Master": "9999", "Ann Lee": "4821"}
+    kinds = [e["kind"] for e in lm.db.query("SELECT kind FROM events")]
+    assert kinds.count("code.present") == 1 and "code.added" not in kinds
+    tick_at(lm, at("2030-01-10T15:00"))  # final check: code counts as confirmed
+    assert lm.db.one("SELECT * FROM guest_notices") is None
+
+
+def test_alerts_when_hostaway_leaves_a_departed_guest_code(lm):
+    lm.s.upsert_reservation(res())
+    lm.ha.codes["lock.a"]["Ann Lee"] = "4821"
+    tick_at(lm, at("2030-01-10T08:01"))
+
+    def stale_alerts():
+        return [m for t, m in lm.ha.notes if t.startswith("Old guest code")]
+
+    tick_at(lm, at("2030-01-15T10:01"))  # checkout: Hostaway still has time to remove it
+    assert stale_alerts() == []
+    tick_at(lm, at("2030-01-15T12:01"))
+    tick_at(lm, at("2030-01-15T12:30"))
+    assert len(stale_alerts()) == 1 and '"Ann Lee"' in stale_alerts()[0]
+    assert lm.ha.codes["lock.a"]["Ann Lee"] == "4821"  # reported, never deleted by us
+
+
+def test_no_stale_alert_when_hostaway_removed_it(lm):
+    lm.s.upsert_reservation(res())
+    lm.ha.codes["lock.a"]["Ann Lee"] = "4821"
+    tick_at(lm, at("2030-01-10T08:01"))
+    del lm.ha.codes["lock.a"]["Ann Lee"]
+    tick_at(lm, at("2030-01-15T12:01"))
+    assert not [t for t, _ in lm.ha.notes if t.startswith("Old guest code")]
 
 
 def test_daily_report_once_a_day(lm):

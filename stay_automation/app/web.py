@@ -107,6 +107,7 @@ SETTING_LABELS = {
     "retry_minutes": "Retry failed locks every (minutes)",
     "daily_check_hour": "Daily lock check (hour)",
     "report_hour": "Daily arrivals report (hour)",
+    "stale_check_minutes": "Alert if Hostaway has not removed a guest code this many minutes after checkout",
 }
 
 

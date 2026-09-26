@@ -54,18 +54,19 @@ class Syncer:
         added = 0
         for listing in listings:
             hostaway_name = listing.get("internalListingName") or listing.get("name") or str(listing["id"])
+            address = listing.get("address") or listing.get("street")
             existing = self.db.one(
                 "SELECT id FROM properties WHERE hostaway_listing_id = ?", (listing["id"],)
             )
             if existing:
                 self.db.execute(
-                    "UPDATE properties SET hostaway_name = ? WHERE id = ?",
-                    (hostaway_name, existing["id"]),
+                    "UPDATE properties SET hostaway_name = ?, address = ? WHERE id = ?",
+                    (hostaway_name, address, existing["id"]),
                 )
             else:
                 self.db.execute(
-                    "INSERT INTO properties(hostaway_listing_id, hostaway_name, name) VALUES(?, ?, ?)",
-                    (listing["id"], hostaway_name, hostaway_name),
+                    "INSERT INTO properties(hostaway_listing_id, hostaway_name, name, address) VALUES(?, ?, ?, ?)",
+                    (listing["id"], hostaway_name, hostaway_name, address),
                 )
                 added += 1
         if added:
@@ -76,7 +77,7 @@ class Syncer:
 
     async def discover_locks(self) -> int:
         locks = await self.ha.schlage_locks()
-        properties = self.db.query("SELECT id, name, hostaway_name FROM properties")
+        properties = self.db.query("SELECT id, name, hostaway_name, address FROM properties")
         matched = 0
         for lock in locks:
             existing = self.db.one("SELECT * FROM locks WHERE entity_id = ?", (lock["entity_id"],))
@@ -173,10 +174,16 @@ class Syncer:
                 (*(new[f] for f in RESERVATION_FIELDS), utcnow(), new["id"]),
             )
         if what:
-            prop = self.db.one("SELECT id FROM properties WHERE hostaway_listing_id = ?",
-                               (new["listing_id"],))
-            if prop:  # let the lock logic look at this home on its next pass
-                self.db.execute("UPDATE locks SET next_check_at = NULL WHERE property_id = ?", (prop["id"],))
+            # Let the lock logic look at this home on its next pass, and at the old home if the booking moved.
+            listing_ids = {new["listing_id"], old["listing_id"] if old else new["listing_id"]}
+            homes = self.db.query(
+                f"SELECT id, hostaway_listing_id FROM properties "
+                f"WHERE hostaway_listing_id IN ({', '.join('?' for _ in listing_ids)})",
+                tuple(listing_ids),
+            )
+            for home in homes:
+                self.db.execute("UPDATE locks SET next_check_at = NULL WHERE property_id = ?", (home["id"],))
+            prop = next((h for h in homes if h["hostaway_listing_id"] == new["listing_id"]), None)
             self.db.log(
                 "reservation." + what[0],
                 f"Reservation {new['id']}: {', '.join(what)} "

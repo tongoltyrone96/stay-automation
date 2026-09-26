@@ -50,6 +50,7 @@ def test_changes():
     assert changes(old, norm(doorCode="1111")) == ["code_changed"]
     assert changes(norm(doorCode=None), old) == ["code_set"]
     assert changes(old, norm(arrivalDate="2026-09-30")) == ["arrival_changed"]
+    assert changes(old, norm(listingMapId=11)) == ["moved"]
     assert changes(old, norm()) == []
 
 

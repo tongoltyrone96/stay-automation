@@ -3,6 +3,10 @@
 Every few minutes, locks that are due get reconciled: work out which of our codes (named HA-<reservation id>)
 should be in the lock right now, read the lock, add or remove the difference, then read it again. The read-back
 is the only thing trusted; Schlage calls often time out yet succeed, or return OK yet do nothing.
+
+Hostaway's own lock automation stays on: it creates the guest code and usually writes it to the lock itself.
+A code already in the lock under Hostaway's name counts as present, so we only add our copy when it is missing.
+Hostaway's codes are never touched; if one outlives its guest, staff are told.
 """
 import asyncio
 import json
@@ -10,7 +14,7 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .db import utcnow
 
@@ -29,6 +33,7 @@ DEFAULTS = {
     "retry_minutes": 15,
     "daily_check_hour": 6,
     "report_hour": 7,
+    "stale_check_minutes": 120,  # after checkout, time Hostaway gets to remove its code before staff hear
 }
 
 DEFAULT_GUEST_MESSAGE = (
@@ -67,8 +72,8 @@ def desired_codes(reservations: list[dict[str, Any]], now: datetime, add_hour: i
 class Plan:
     add: dict[str, str] = field(default_factory=dict)
     delete: list[str] = field(default_factory=list)
-    # Wanted codes already present under someone else's name (e.g. written by Hostaway during the
-    # changeover). Schlage refuses duplicate codes, and the guest can get in either way.
+    # Wanted codes already present under someone else's name (usually written by Hostaway).
+    # Schlage refuses duplicate codes, and the guest can get in either way.
     elsewhere: list[str] = field(default_factory=list)
 
     @property
@@ -112,6 +117,7 @@ def next_check(reservations: list[dict[str, Any]], now: datetime, cfg: dict[str,
             add_time(r, cfg["add_hour"], cfg["early_lead_hours"]),
             check_in - timedelta(minutes=cfg["final_check_minutes"]),
             _dt(r["check_out_at"]),
+            _dt(r["check_out_at"]) + timedelta(minutes=cfg["stale_check_minutes"]),
         ]
         if afternoon < check_in:
             times.append(afternoon)
@@ -124,10 +130,10 @@ def in_final_window(r: dict[str, Any], now: datetime, final_minutes: int) -> boo
     return r["active"] and check_in - timedelta(minutes=final_minutes) <= now < check_in + timedelta(hours=6)
 
 
-def new_backup_code(avoid: set[str]) -> str:
+def new_backup_code(taken: Callable[[str], bool]) -> str:
     while True:
         code = f"{secrets.randbelow(9000) + 1000}"
-        if code not in avoid:
+        if not taken(code):
             return code
 
 
@@ -152,10 +158,12 @@ class LockManager:
     async def tick(self) -> int:
         now = self.s.now()
         self._prepare_backup_codes(now)
+        # Automated homes, plus homes switched off that still hold our codes (wound down, never added to).
         due = self.db.query(
-            "SELECT l.*, p.name AS property_name, p.backup_code FROM locks l "
+            "SELECT l.*, p.name AS property_name, p.backup_code, p.backup_used_by, "
+            "p.lock_automation = 1 AND p.active = 1 AS automated FROM locks l "
             "JOIN properties p ON p.id = l.property_id "
-            "WHERE p.lock_automation = 1 AND p.active = 1 "
+            "WHERE (p.lock_automation = 1 AND p.active = 1 OR l.code_names LIKE '%\"" + PREFIX + "%') "
             "AND (l.next_check_at IS NULL OR l.next_check_at <= ?) ORDER BY l.next_check_at",
             (_utc(now),),
         )
@@ -167,15 +175,20 @@ class LockManager:
 
     async def reconcile(self, lock: dict[str, Any], now: datetime) -> bool:
         cfg = self.cfg()
+        # Claim the lock until a retry would be due. A reservation change during the slow lock calls clears
+        # next_check_at; the conditional write at the end then leaves it cleared, so the next tick looks again.
+        claim = _utc(now + timedelta(minutes=cfg["retry_minutes"]))
+        self.db.execute("UPDATE locks SET next_check_at = ? WHERE id = ?", (claim, lock["id"]))
         reservations = self.s.reservations_for(lock["property_id"])
-        backup = lock["backup_code"] if self.db.get_bool("backup_codes_enabled") else None
-        desired = desired_codes(reservations, now, cfg["add_hour"], cfg["early_lead_hours"], backup)
 
         actual = await self._read(lock)
         if actual is None:
-            return await self._failed(lock, now, reservations, "could not read the lock", None)
+            return await self._failed(lock, now, reservations, claim, "could not read the lock", None)
+        desired = self._desired(lock, reservations, now, actual, cfg)
 
         first = plan(desired, actual)
+        if BACKUP_NAME in first.elsewhere:
+            self._retire_backup(lock)
         if not first.ok:
             for name in first.delete:
                 await self._try(lock, "remove", name, self.ha.delete_code(lock["entity_id"], name))
@@ -184,7 +197,8 @@ class LockManager:
             await asyncio.sleep(self.verify_delay)
             actual = await self._read(lock)
             if actual is None:
-                return await self._failed(lock, now, reservations, "could not read the lock after changes", None)
+                return await self._failed(lock, now, reservations, claim,
+                                          "could not read the lock after changes", None)
 
         final = plan(desired, actual)
         for name in first.add:
@@ -195,20 +209,59 @@ class LockManager:
             if name not in final.delete and name not in final.add:
                 self.db.log("code.removed", f"{name} removed from {lock['name']} (verified)",
                             property_id=lock["property_id"])
+        self._log_present_elsewhere(lock, final.elsewhere)
 
         if not final.ok:
             problems = [f"missing {n}" for n in final.add] + [f"still has {n}" for n in final.delete]
-            return await self._failed(lock, now, reservations, ", ".join(problems), actual)
+            return await self._failed(lock, now, reservations, claim, ", ".join(problems), actual)
 
-        self.db.execute(
-            "UPDATE locks SET fail_count = 0, last_error = NULL, last_reconciled_at = ?, next_check_at = ? "
-            "WHERE id = ?",
-            (utcnow(), _utc(next_check(reservations, now, cfg)), lock["id"]),
-        )
+        self._finish(lock, claim, next_check(reservations, now, cfg), 0, None)
         await self._final_checks(lock, now, reservations, actual, "")
         return True
 
     # ---- helpers ------------------------------------------------------------
+
+    def _desired(self, lock, reservations, now, actual, cfg) -> dict[str, str]:
+        backup = lock["backup_code"] if self.db.get_bool("backup_codes_enabled") else None
+        if lock["automated"]:
+            return desired_codes(reservations, now, cfg["add_hour"], cfg["early_lead_hours"], backup)
+        # Automation switched off: add nothing, but codes already handed out stay until that guest checks out.
+        keep = {n: c for n, c in desired_codes(reservations, now, cfg["add_hour"], cfg["early_lead_hours"]).items()
+                if n in actual}
+        if backup and BACKUP_NAME in actual and self._backup_guest_staying(lock, now):
+            keep[BACKUP_NAME] = backup
+        return keep
+
+    def _backup_guest_staying(self, lock, now: datetime) -> bool:
+        if not lock["backup_used_by"]:
+            return False
+        r = self.db.one("SELECT check_out_at FROM reservations WHERE id = ?", (lock["backup_used_by"],))
+        return r is not None and _dt(r["check_out_at"]) > now
+
+    def _log_present_elsewhere(self, lock, names: list[str]) -> None:
+        """Once per booking: the guest code was already in the lock (Hostaway wrote it), so we added nothing.
+        Together with code.added this shows how often Hostaway alone would have left a guest without a code."""
+        for name in names:
+            if name == BACKUP_NAME:
+                continue
+            rid = int(name.removeprefix(PREFIX))
+            if not self.db.one("SELECT 1 FROM events WHERE kind = 'code.present' AND reservation_id = ?", (rid,)):
+                self.db.log("code.present", f"Guest code for {rid} already in {lock['name']} (from Hostaway)",
+                            property_id=lock["property_id"], reservation_id=rid)
+
+    def _retire_backup(self, lock) -> None:
+        """The backup code already opens this lock under another name (e.g. Master); never hand that out."""
+        self.db.execute("UPDATE properties SET backup_code = NULL, backup_used_by = NULL WHERE id = ?",
+                        (lock["property_id"],))
+        self.db.log("backup.clash", f"Backup code matched another code in {lock['name']}; replacing it",
+                    level="warning", property_id=lock["property_id"])
+
+    def _finish(self, lock, claim: str, next_at: datetime, fail_count: int, error: str | None) -> None:
+        self.db.execute(
+            "UPDATE locks SET fail_count = ?, last_error = ?, last_reconciled_at = ?, "
+            "next_check_at = CASE WHEN next_check_at = ? THEN ? ELSE next_check_at END WHERE id = ?",
+            (fail_count, error, utcnow(), claim, _utc(next_at), lock["id"]),
+        )
 
     async def _read(self, lock: dict[str, Any]) -> dict[str, str] | None:
         try:
@@ -225,15 +278,11 @@ class LockManager:
         except Exception as exc:  # judged by the read-back, not by this
             log.info("%s %s on %s returned %s", verb, name, lock["entity_id"], exc or type(exc).__name__)
 
-    async def _failed(self, lock, now, reservations, error: str, actual) -> bool:
+    async def _failed(self, lock, now, reservations, claim: str, error: str, actual) -> bool:
         cfg = self.cfg()
         fail_count = (lock["fail_count"] or 0) + 1
         retry_at = min(now + timedelta(minutes=cfg["retry_minutes"]), next_check(reservations, now, cfg))
-        self.db.execute(
-            "UPDATE locks SET fail_count = ?, last_error = ?, last_reconciled_at = ?, next_check_at = ? "
-            "WHERE id = ?",
-            (fail_count, error, utcnow(), _utc(retry_at), lock["id"]),
-        )
+        self._finish(lock, claim, retry_at, fail_count, error)
         self.db.log("lock.failed", f"{lock['name']}: {error} (attempt {fail_count})",
                     level="warning", property_id=lock["property_id"])
         if fail_count == 1:
@@ -245,6 +294,8 @@ class LockManager:
 
     async def _final_checks(self, lock, now, reservations, actual, error: str) -> None:
         """Within the hour before check-in, a guest whose code is not confirmed gets the backup code."""
+        if not lock["automated"]:
+            return
         final_minutes = self.cfg()["final_check_minutes"]
         for r in reservations:
             if not in_final_window(r, now, final_minutes):
@@ -258,6 +309,26 @@ class LockManager:
             else:
                 reason = "the code is not in the lock"
             await self.fallback(r, lock, reason)
+        if actual is not None:
+            await self._stale_checks(lock, now, reservations, actual)
+
+    async def _stale_checks(self, lock, now, reservations, actual: dict[str, str]) -> None:
+        """Hostaway removes its own code at checkout. If a departed guest's code is still in the lock under
+        another name, staff are told; we never delete codes we did not write."""
+        grace = timedelta(minutes=self.cfg()["stale_check_minutes"])
+        still_wanted = {r["door_code"] for r in reservations if r["active"] and _dt(r["check_out_at"]) > now}
+        for r in reservations:
+            out = _dt(r["check_out_at"])
+            if not (r["active"] and r["door_code"] and out + grace <= now < out + timedelta(days=1)):
+                continue
+            names = [n for n, c in actual.items() if c == r["door_code"] and not n.startswith(PREFIX)]
+            if names and r["door_code"] not in still_wanted:
+                left = out.astimezone(self.s.tz).strftime("%a %I:%M %p").replace(" 0", " ")
+                await self.alert(
+                    f"Old guest code still in lock: {lock['property_name']}",
+                    f"{r['guest_name'] or 'The guest'} checked out {left}, but their code is still in "
+                    f"{lock['name']} as \"{names[0]}\". Please remove it in the Schlage app.",
+                    key=f"stale:{r['id']}:{lock['id']}")
 
     async def fallback(self, r: dict[str, Any], lock: dict[str, Any], reason: str) -> None:
         if self.db.one("SELECT 1 FROM guest_notices WHERE reservation_id = ?", (r["id"],)):
@@ -313,7 +384,12 @@ class LockManager:
                 "SELECT check_out_at FROM reservations WHERE id = ?", (prop["backup_used_by"],))
             if prop["backup_code"] and not (used_by and _dt(used_by["check_out_at"]) <= now):
                 continue
-            code = new_backup_code(taken | {prop["backup_code"] or ""})
+            in_lock = set()  # hashes of every code last read from this home's locks (Master, Cleaners, guests)
+            for row in self.db.query("SELECT code_hashes FROM locks WHERE property_id = ? AND code_hashes IS NOT NULL",
+                                     (prop["id"],)):
+                in_lock |= set(json.loads(row["code_hashes"]))
+            code = new_backup_code(lambda c: c in taken or c == prop["backup_code"]
+                                   or self.s.code_hash(c) in in_lock)
             taken.add(code)
             self.db.execute("UPDATE properties SET backup_code = ?, backup_used_by = NULL WHERE id = ?",
                             (code, prop["id"]))

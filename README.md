@@ -11,6 +11,9 @@ Home Assistant add-on that keeps Schlage lock codes and Honeywell thermostats in
   retry every 15 minutes and alert staff. An hour before check-in, a guest whose code is not confirmed gets
   the home's backup code through Hostaway (when enabled), and staff are alerted. Daily arrivals report.
   Codes this add-on did not write are never touched.
+- Hostaway's own lock automation stays on: Hostaway creates each guest code and usually writes it to the lock.
+  A code Hostaway already wrote counts as present, so the add-on only adds its own copy when the code is missing.
+  If Hostaway has not removed a guest's code two hours after checkout, staff are alerted.
 - Phase 3 (thermostats) is not built yet.
 
 ## Run locally

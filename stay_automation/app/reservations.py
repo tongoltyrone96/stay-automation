@@ -46,6 +46,8 @@ def changes(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
     if not new["active"]:
         return []
     out = []
+    if new["listing_id"] != old["listing_id"]:
+        out.append("moved")
     if new["check_in_at"] != old["check_in_at"]:
         out.append("arrival_changed")
     old_out = datetime.fromisoformat(old["check_out_at"])

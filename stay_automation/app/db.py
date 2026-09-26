@@ -80,6 +80,7 @@ MIGRATIONS = {
     "properties": {
         "backup_code": "TEXT",
         "backup_used_by": "INTEGER",
+        "address": "TEXT",
     },
     "locks": {
         "next_check_at": "TEXT",

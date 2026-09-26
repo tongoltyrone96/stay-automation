@@ -1,4 +1,4 @@
-"""Match HA lock names ("124 Maple", "Cc6 Schlage") to Hostaway listings ("Maple 124b", "CC6")."""
+"""Match HA lock names ("124 Maple", "Cc6 Schlage") to Hostaway listings ("Maple 124b", "CC6") and addresses."""
 import re
 
 # Words people add to lock names that never appear in listing names.
@@ -37,7 +37,8 @@ def match_lock(lock_name: str, listings: list[dict]) -> int | None:
         return None
     hits = []
     for listing in listings:
-        listing_tokens = tokens(f"{listing.get('hostaway_name') or ''} {listing.get('name') or ''}")
+        # The street address carries the house number most lock names start with ("1114 Falling Water Front").
+        listing_tokens = tokens(" ".join(listing.get(k) or "" for k in ("hostaway_name", "name", "address")))
         if all(_token_in(k, listing_tokens) for k in keys):
             hits.append(listing["id"])
     return hits[0] if len(hits) == 1 else None
